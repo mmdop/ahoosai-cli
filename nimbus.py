@@ -28,6 +28,8 @@ because the value of the prompt is that you read it.
 from __future__ import annotations
 
 import sys
+import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -38,6 +40,48 @@ from client import Chip, Client, Config, NimbusError, load_env  # noqa: E402
 
 HISTORY_TURNS = 6
 MAX_AGENT_STEPS = 8
+
+
+class Waiting:
+    """A clock, because the first minute of a request shows nothing else.
+
+    The server streams what the family is *doing*, and the first of those events
+    is the finished plan -- which arrives only after a whole planning call. On a
+    free tier that has gone to sleep, add a cold start in front of that. So
+    between pressing enter and the first line of output there can be a minute
+    and a half of silence, which is indistinguishable from a hang.
+
+    This is not decoration. It is the difference between "it is working" and
+    "it is broken", and nothing else on screen tells those apart.
+    """
+
+    COLD = 20  # seconds after which a sleeping free tier is the likely answer
+
+    def __init__(self) -> None:
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._tick, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._stop.is_set():
+            return
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1)
+        sys.stdout.write("\r" + " " * 70 + "\r")
+        sys.stdout.flush()
+
+    def _tick(self) -> None:
+        began = time.monotonic()
+        while not self._stop.wait(0.5):
+            seconds = int(time.monotonic() - began)
+            note = "  (a sleeping free tier takes about a minute to wake)" if seconds >= self.COLD else ""
+            sys.stdout.write("\r  " + r.grey("working  " + str(seconds) + "s" + note))
+            sys.stdout.flush()
 
 
 class Session:
@@ -78,15 +122,20 @@ class Session:
 
         while step < MAX_AGENT_STEPS:
             step += 1
+            clock = Waiting()
+            clock.start()
             try:
                 run = self.client.ask(
                     self.prompt_with_history(pending) if step == 1 else pending,
                     chips=self.chips(),
-                    on_event=self._progress,
+                    on_event=lambda kind, data: self._report(clock, kind, data),
                 )
             except NimbusError as exc:
+                clock.stop()
                 print(r.red("  " + str(exc)))
                 return
+            finally:
+                clock.stop()
 
             answer = run.get("answer", "")
             self.turns.append(("Nimbus", answer))
@@ -149,8 +198,22 @@ class Session:
     # -- progress and summary ----------------------------------------------
 
     @staticmethod
+    def _report(clock: "Waiting", kind: str, data: dict) -> None:
+        """Print an event on its own line, then go back to counting.
+
+        Each delegation is its own wait, so the clock has to survive the events
+        rather than stop at the first one. It is cleared, the line is printed
+        above it, and it starts again from zero for the next stretch.
+        """
+        clock.stop()
+        Session._progress(kind, data)
+        clock.start()
+
+    @staticmethod
     def _progress(kind: str, data: dict) -> None:
-        if kind == "plan:done":
+        if kind == "plan:start":
+            print(r.grey(f"  planning with {data.get('value', 'the manager')}"))
+        elif kind == "plan:done":
             if data.get("handle_directly"):
                 print(r.grey("  manager answering directly"))
             else:
