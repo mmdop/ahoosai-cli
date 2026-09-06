@@ -53,6 +53,7 @@ python nimbus.py "why is this slow"   # ask once and exit
 | `enter` | send |
 | `up` / `down` | earlier things you typed |
 | `pgup` / `pgdn` | scroll back through the conversation |
+| `ctrl-o` | pick the folder to work in |
 | `y` / `n` | answer a confirmation |
 | `ctrl-c` | clear the line you are typing |
 | `ctrl-d` | leave |
@@ -62,7 +63,8 @@ python nimbus.py "why is this slow"   # ask once and exit
 | `/help` | the commands |
 | `/models` | what the server has, and which one manages |
 | `/agent [on\|off]` | let it read, write and run here |
-| `/cd <path>` | change the directory it works in |
+| `/open` | pick the folder to work in, without typing a path |
+| `/cd <path>` | change the directory by typing it |
 | `/new` | forget the conversation |
 | `/exit` | leave |
 
@@ -105,6 +107,20 @@ it. Both are ways of ending; the second is the normal one.
 the plan, each delegation, each result — and then sends the finished answer in
 one event. A client that drains those events shows nothing for thirty seconds
 and looks hung, so this prints them. The routing is the interesting part anyway.
+
+## Picking a folder
+
+`ctrl-o`, or `/open`. Arrows move, `→` goes into a folder, `←` goes up,
+typing filters, and **enter chooses the folder you are looking at** -- not the
+row that is highlighted.
+
+That split is deliberate. Enter-picks-the-highlighted-row reads well until you
+walk into the folder you wanted and press enter and get its first child, because
+descending puts the highlight on the first row. Navigate to it, then confirm it.
+
+Dot-directories are hidden until your filter starts with a dot. `.git` and
+`.venv` sort to the top of every listing and are not places anyone means to
+point a coding agent at.
 
 ## Why the interface has no dependencies
 

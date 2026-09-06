@@ -191,6 +191,84 @@ class Keys:
         }.get(ch, ch if ch.isprintable() else "")
 
 
+# -- choosing a folder ------------------------------------------------------
+
+class Picker:
+    """Walk the filesystem and pick the directory the agent works in.
+
+    Enter chooses the folder you are looking at; the arrows move around. That
+    split is deliberate. The obvious alternative -- enter picks whatever row is
+    highlighted -- reads well until you walk into the folder you wanted and
+    press enter, and get its first child instead, because descending puts the
+    highlight on the first row. Navigate to it, then confirm it.
+
+    Typing filters. There is no other use for letters here, and a long list of
+    directories is exactly where a filter earns its place.
+
+    Dot-directories are hidden until the filter starts with a dot. .git and
+    .venv are not places anyone means to point a coding agent at, and they sort
+    to the top of every listing.
+    """
+
+    def __init__(self, start: Path) -> None:
+        self.at = start.resolve()
+        self.filter = ""
+        self.index = 0
+        self.entries: list[Path] = []
+        self.refresh()
+
+    def refresh(self) -> None:
+        try:
+            found = [p for p in self.at.iterdir() if p.is_dir()]
+        except (PermissionError, OSError):
+            found = []  # an unreadable directory is empty, not a crash
+        if not self.filter.startswith("."):
+            found = [p for p in found if not p.name.startswith(".")]
+        if self.filter:
+            needle = self.filter.lower()
+            found = [p for p in found if needle in p.name.lower()]
+        self.entries = sorted(found, key=lambda p: p.name.lower())
+        self.index = max(0, min(self.index, len(self.entries) - 1))
+
+    def move(self, delta: int) -> None:
+        if self.entries:
+            self.index = max(0, min(len(self.entries) - 1, self.index + delta))
+
+    def enter(self) -> None:
+        if self.entries:
+            self.at = self.entries[self.index]
+            self.filter, self.index = "", 0
+            self.refresh()
+
+    def up(self) -> None:
+        if self.at.parent != self.at:
+            was = self.at
+            self.at = self.at.parent
+            self.filter = ""
+            self.refresh()
+            # Land on the folder just left, so going up and down is reversible.
+            self.index = next((i for i, p in enumerate(self.entries) if p == was), 0)
+
+    def chosen(self) -> Path:
+        return self.at
+
+    def rows(self, height: int) -> list[str]:
+        out = [f"{ACCENT}  {self.at}{RESET}{FAINT}   enter uses this{RESET}", ""]
+        room = max(3, height - 3)
+        if not self.entries:
+            out.append(f"{FAINT}    nothing here{' matching ' + self.filter if self.filter else ''}{RESET}")
+            return out
+        top = max(0, min(self.index - room // 2, len(self.entries) - room))
+        for i, path in enumerate(self.entries[top:top + room], start=top):
+            if i == self.index:
+                out.append(f"{ACCENT}  ▸ {path.name}{RESET}")
+            else:
+                out.append(f"{INK}    {path.name}{RESET}")
+        if len(self.entries) > room:
+            out.append(f"{FAINT}    {len(self.entries) - room} more{RESET}")
+        return out
+
+
 # -- the app ----------------------------------------------------------------
 
 class App:
@@ -224,6 +302,7 @@ class App:
         self.dirty = True
         self.last_role: str | None = None
 
+        self.picker: Picker | None = None
         self.pending: actions.Action | None = None
         self.answered = threading.Event()
         self.answer = False
@@ -307,13 +386,17 @@ class App:
         # Two for the frame margin, four for the gutter a role block adds.
         r.set_width(width - 6)
 
-        painted = self.painted(width)
-        top = max(0, len(painted) - body - self.scroll)
-        view = painted[top:top + body]
-        # Anchored to the bottom: a conversation grows downward, and an empty
-        # session should show an empty top rather than a screen of nothing
-        # underneath three lines of text.
-        view = [""] * (body - len(view)) + view
+        if self.picker is not None:
+            view = self.picker.rows(body)[:body]
+            view = view + [""] * (body - len(view))
+        else:
+            painted = self.painted(width)
+            top = max(0, len(painted) - body - self.scroll)
+            view = painted[top:top + body]
+            # Anchored to the bottom: a conversation grows downward, and an
+            # empty session should show an empty top rather than a screen of
+            # nothing underneath three lines of text.
+            view = [""] * (body - len(view)) + view
 
         out = [f"{ESC}[H", self._header(width), CLEAR_LINE, "\n"]
         for row in view:
@@ -335,6 +418,9 @@ class App:
         return self._bar(left, right, width)
 
     def _status(self, width: int) -> str:
+        if self.picker is not None:
+            return self._bar(f"{ACCENT} choose a folder{RESET}{BAR}",
+                             f"{FAINT}enter use this   → go in   ← up   esc cancel {RESET}{BAR}", width)
         if self.pending is not None:
             return self._bar(f"{GOLD} run it?{RESET}{BAR}", f"{FAINT}y = yes   n = no {RESET}{BAR}", width)
         if self.working_since is not None:
@@ -370,6 +456,16 @@ class App:
         pad = " " * max(0, room - len(lit) - len(under) - len(rest))
 
         edge = ACCENT if self.working_since is None else GOLD
+        if self.picker is not None:
+            room = inner - 4
+            shown = self.picker.filter[-room:]
+            field = f"{INK}{shown}{ESC}[7m {RESET}"
+            pad = " " * max(0, room - len(shown) - 1)
+            return [
+                f"{edge}╭{'─' * inner}╮{RESET}",
+                f"{edge}│{RESET} {ACCENT}⌕{RESET} {field}{pad} {edge}│{RESET}",
+                f"{edge}╰{'─' * inner}╯{RESET}",
+            ]
         return [
             f"{edge}╭{'─' * inner}╮{RESET}",
             f"{edge}│{RESET} {ACCENT}❯{RESET} {field}{pad} {edge}│{RESET}",
@@ -404,6 +500,10 @@ class App:
     def key(self, key: str) -> None:
         self.dirty = True
 
+        if self.picker is not None:
+            self.pick_key(key)
+            return
+
         if self.pending is not None:  # a confirmation is on screen
             if key in ("y", "Y"):
                 self.answer = True
@@ -414,7 +514,9 @@ class App:
             return
 
         page = max(1, self.size()[1] - self.CHROME - 1)
-        if key == "ctrl-d":
+        if key == "ctrl-o":
+            self.open_picker()
+        elif key == "ctrl-d":
             self.running = False
         elif key in ("ctrl-c", "ctrl-u"):
             self.entry, self.caret = "", 0
@@ -455,6 +557,49 @@ class App:
             self.entry = self.entry[:self.caret] + key + self.entry[self.caret:]
             self.caret += 1
 
+    # -- the folder picker --------------------------------------------------
+
+    def open_picker(self) -> None:
+        self.picker = Picker(self.session.workspace.root)
+        self.dirty = True
+
+    def pick_key(self, key: str) -> None:
+        picker = self.picker
+        if picker is None:
+            return
+        if key in ("escape", "ctrl-c", "ctrl-o"):
+            self.picker = None
+        elif key == "up":
+            picker.move(-1)
+        elif key == "down":
+            picker.move(1)
+        elif key == "pgup":
+            picker.move(-(self.size()[1] - self.CHROME - 4))
+        elif key == "pgdn":
+            picker.move(self.size()[1] - self.CHROME - 4)
+        elif key == "right":
+            picker.enter()
+        elif key in ("left", "backspace") and not picker.filter:
+            picker.up()
+        elif key == "backspace":
+            picker.filter = picker.filter[:-1]
+            picker.refresh()
+        elif key == "enter":
+            self.choose(picker.chosen())
+        elif len(key) == 1:
+            picker.filter += key
+            picker.refresh()
+
+    def choose(self, path: Path) -> None:
+        self.picker = None
+        try:
+            self.session.workspace = actions.Workspace(path)
+        except Exception as exc:
+            self.write(f"{exc}", role="error")
+            return
+        self.last_role = None
+        self.write(f"{FAINT}  working in {path}{RESET}")
+
     def submit(self) -> None:
         line = self.entry.strip()
         if not line or self.working_since is not None:
@@ -464,6 +609,9 @@ class App:
         self.history_at = len(self.history)
         self.write(line, role="you")
 
+        if line in ("/open", "/folder"):
+            self.open_picker()
+            return
         if line.startswith("/"):
             self.last_role = None
             if not self.command(line, self.session):

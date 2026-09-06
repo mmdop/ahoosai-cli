@@ -241,7 +241,8 @@ HELP = """
   /help              this
   /models            what the server has
   /agent [on|off]    let it read, write and run in this directory
-  /cd <path>         change the working directory
+  /open              pick the folder to work in  (ctrl-o)
+  /cd <path>         change the working directory by typing it
   /pwd               where it is working
   /new               forget the conversation
   /exit              leave
@@ -278,6 +279,10 @@ def command(line: str, session: Session) -> bool:
             out(r.grey(f"  {session.workspace.root}"))
         except Exception as exc:
             out(r.red(f"  {exc}"))
+    elif name in ("open", "folder"):
+        # The full-screen interface intercepts this before it reaches here, so
+        # arriving means there is no screen to draw a picker on.
+        out(r.grey("  the folder picker needs the full-screen interface. Use /cd <path> here."))
     elif name == "pwd":
         out(r.grey(f"  {session.workspace.root}"))
     elif name == "new":
