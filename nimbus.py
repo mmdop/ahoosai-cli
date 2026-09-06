@@ -106,6 +106,10 @@ class Session:
                     on_event=self._progress,
                 )
             except NimbusError as exc:
+                # Stop the clock before writing, not after. The finally below
+                # runs after this block, so the ticking thread was still
+                # rewriting its line while the error printed over it.
+                self.ui.busy(False)
                 self.ui.write(r.red("  " + str(exc)), role="error")
                 return
             finally:

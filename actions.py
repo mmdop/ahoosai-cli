@@ -63,6 +63,9 @@ part you were given.
 Rules that matter:
 
 - Asked to create or change a file, use `write`. Do not print the file instead.
+- If the file you are writing contains ``` itself, open the block with four
+  backticks and close it with four. Three inside three ends the block early
+  and writes half a file.
 - Paths are relative to the project root. Never use absolute paths or `..`.
 - `write` replaces the whole file. Include every line you want to keep.
 - Read a file before rewriting it. Editing a file you have not seen is guessing.
@@ -84,9 +87,21 @@ def protocol_chip(root: Path, listing: str) -> Chip:
     )
 
 
+# The closing fence has to be the same run of backticks as the opening one.
+#
+# With a fixed three, asking for a README that itself contains a fenced example
+# wrote a file truncated at that example's fence -- and the confirmation prompt
+# showed the truncated version, so the person approved a file that was not the
+# file. Matching the length lets a block opened with four backticks carry three
+# inside it, which is how markdown has always handled this, and the protocol
+# above tells the model to do exactly that.
+#
+# Case-insensitive for the same reason the gear tokens are: a model that writes
+# nimbus:Write meant to write, and silently doing nothing is the worst reading.
 BLOCK = re.compile(
-    r"```nimbus:(read|list|write|run)[ \t]*([^\n`]*)\n?(.*?)```",
-    re.DOTALL,
+    r"(?P<fence>`{3,})nimbus:(?P<kind>read|list|write|run)[ \t]*(?P<target>[^\n`]*)"
+    r"(?:(?P=fence)|\n(?P<body>.*?)\n?(?P=fence))",
+    re.DOTALL | re.IGNORECASE,
 )
 
 
@@ -111,8 +126,10 @@ class Action:
 def find(answer: str) -> list[Action]:
     """Every action block in an answer, in the order the model wrote them."""
     found = []
-    for kind, target, body in BLOCK.findall(answer):
-        target = target.strip()
+    for match in BLOCK.finditer(answer):
+        kind = match.group("kind").lower()
+        target = (match.group("target") or "").strip()
+        body = match.group("body") or ""
         # A one-line read is written ```nimbus:read path``` with the path on the
         # info line and nothing in the body; a run puts its command in the body.
         if kind in ("read", "list") and not target and body.strip():
