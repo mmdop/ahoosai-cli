@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# test debris: the agent writes files here while it is being tried out
+index.html
