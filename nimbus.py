@@ -54,7 +54,7 @@ MAX_AGENT_STEPS = 8
 class UI(Protocol):
     """Everything a Session needs from the world."""
 
-    def write(self, text: str) -> None: ...
+    def write(self, text: str, role: str | None = None) -> None: ...
     def busy(self, working: bool) -> None: ...
     def confirm(self, action: "actions.Action") -> bool: ...
 
@@ -106,7 +106,7 @@ class Session:
                     on_event=self._progress,
                 )
             except NimbusError as exc:
-                self.ui.write(r.red("  " + str(exc)))
+                self.ui.write(r.red("  " + str(exc)), role="error")
                 return
             finally:
                 self.ui.busy(False)
@@ -117,7 +117,7 @@ class Session:
             requested = actions.find(answer) if self.agent else []
             prose = actions.strip(answer) if requested else answer
             if prose:
-                self.ui.write(r.answer(prose))
+                self.ui.write(r.answer(prose), role="answer")
 
             if not requested:
                 self._footer(run)
@@ -145,7 +145,7 @@ class Session:
                 result = self.workspace.perform(action)
             except ValueError as exc:
                 result = f"refused: {exc}"
-                self.ui.write(r.red("  " + result))
+                self.ui.write(r.red("  " + result), role="error")
             out.append(f"### {action.kind} {action.target}\n{result}")
         return "\n\n".join(out) if out else None
 
@@ -186,7 +186,9 @@ class PlainUI:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    def write(self, text: str) -> None:
+    def write(self, text: str, role: str | None = None) -> None:
+        # role is what the full-screen interface uses to label and colour a
+        # block. A scrolling prompt has no blocks, so it drops it.
         print(text)
 
     def busy(self, working: bool) -> None:

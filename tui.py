@@ -8,30 +8,43 @@ has to run on, for a program whose entire job is to talk to one HTTP endpoint.
 The alternate screen buffer, cursor addressing and raw key input are already in
 the terminal and in the standard library. What was missing is written here.
 
+THE LAYOUT, AND WHY IT SITS ON THE BOTTOM
+
+A conversation grows downward, and the thing you are reading is the newest
+thing. So the transcript is anchored to the bottom of its pane and an empty
+session shows an empty top rather than a screenful of nothing under three lines
+of text. The input is a box, not a line, because it is where you are: it should
+be the most solid object on screen.
+
+Every message carries a role, and the role is what makes a wall of text
+readable -- who said this, and is this the model working or the model answering.
+Session passes the role through `write`; the plain front end ignores it, which
+is exactly what an optional argument is for.
+
 HOW IT IS PUT TOGETHER
 
 One worker thread runs the request; the main thread owns the screen and the
-keyboard, and never blocks for longer than a tick. Everything shared between
-them is one list of finished lines behind one lock. That is the whole
-concurrency story, and it is deliberately that small: a UI that repaints from
-two threads is a UI that tears.
+keyboard and never blocks for longer than a tick. Everything shared between
+them is one list of finished lines behind one lock. A UI that repaints from two
+threads is a UI that tears.
 
-Repainting is whole-frame. Each visible row is written with the cursor placed
-on it and the rest of the line erased, so nothing has to be tracked between
-frames and a resize is just a differently shaped frame.
+Painting is whole-frame. Each visible row is written with the cursor placed on
+it and the rest of the line erased, so nothing has to be tracked between frames
+and a resize is simply a differently shaped frame.
 
 WRAPPING WITH COLOUR IN IT
 
-Lines arrive already carrying ANSI codes, so measuring them by len() gives the
-wrong width and cutting them blindly leaves a colour turned on forever. The
-wrapper below counts only printable characters and carries the active code
-across the break.
+Lines arrive carrying ANSI codes, so measuring them with len() gives the wrong
+width and cutting them blindly leaves a colour switched on for the rest of the
+screen. The wrapper counts only printable characters and carries the active
+code across the break.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -45,7 +58,23 @@ ESC = "\033"
 ALT_ON, ALT_OFF = f"{ESC}[?1049h", f"{ESC}[?1049l"
 HIDE, SHOW = f"{ESC}[?25l", f"{ESC}[?25h"
 CLEAR_LINE = f"{ESC}[K"
+RESET = f"{ESC}[0m"
 SGR = re.compile(r"\033\[[0-9;]*m")
+
+# 256-colour, because 16-colour "bright black" is a different colour on every
+# terminal theme and these bars have to sit quietly behind the text.
+BAR = f"{ESC}[48;5;236m"
+INK = f"{ESC}[38;5;252m"
+FAINT = f"{ESC}[38;5;244m"
+ACCENT = f"{ESC}[38;5;75m"
+GOLD = f"{ESC}[38;5;179m"
+
+GUTTER = {
+    "you": ACCENT + "▍ " + RESET,
+    "answer": GOLD + "▍ " + RESET,
+    "error": f"{ESC}[38;5;203m" + "▍ " + RESET,
+}
+LABEL = {"you": "you", "answer": "nimbus"}
 
 
 # -- text -------------------------------------------------------------------
@@ -67,10 +96,10 @@ def wrap(text: str, width: int) -> list[str]:
     row, count, active = "", 0, ""
     for token in re.split(r"(\s+)", text):
         for code in SGR.findall(token):
-            active = "" if code == f"{ESC}[0m" else code
+            active = "" if code == RESET else code
         size = visible(token)
         if count + size > width and count:
-            rows.append(row + (f"{ESC}[0m" if active else ""))
+            rows.append(row + (RESET if active else ""))
             row, count = active, 0
             if not token.strip():
                 continue
@@ -111,8 +140,8 @@ class Keys:
     def get(self, timeout: float) -> str | None:
         """One key, or None if nothing arrived before the timeout.
 
-        Returns a printable character, or a name: enter, backspace, up, down,
-        pgup, pgdn, ctrl-c, ctrl-d, ctrl-l.
+        Returns a printable character, or a name: enter, backspace, left,
+        right, up, down, home, end, pgup, pgdn, escape, ctrl-c, ctrl-d, ctrl-u.
         """
         if self.windows:
             import msvcrt
@@ -124,7 +153,11 @@ class Keys:
                 time.sleep(0.01)
             ch = msvcrt.getwch()
             if ch in ("\x00", "\xe0"):  # a two-part special key
-                return {"H": "up", "P": "down", "I": "pgup", "Q": "pgdn"}.get(msvcrt.getwch(), "")
+                return {
+                    "H": "up", "P": "down", "K": "left", "M": "right",
+                    "G": "home", "O": "end", "I": "pgup", "Q": "pgdn",
+                    "S": "delete",
+                }.get(msvcrt.getwch(), "")
             return self._name(ch)
 
         import select
@@ -132,11 +165,10 @@ class Keys:
         if not select.select([sys.stdin], [], [], timeout)[0]:
             return None
         ch = sys.stdin.read(1)
-        if ch == ESC:  # an escape sequence, or a lone escape key
+        if ch == ESC:
             if not select.select([sys.stdin], [], [], 0.05)[0]:
                 return "escape"
-            rest = sys.stdin.read(1)
-            if rest != "[":
+            if sys.stdin.read(1) != "[":
                 return "escape"
             body = ""
             while True:
@@ -144,22 +176,19 @@ class Keys:
                 body += nxt
                 if nxt.isalpha() or nxt == "~":
                     break
-            return {"A": "up", "B": "down", "5~": "pgup", "6~": "pgdn"}.get(body, "")
+            return {
+                "A": "up", "B": "down", "C": "right", "D": "left",
+                "H": "home", "F": "end", "3~": "delete", "5~": "pgup", "6~": "pgdn",
+            }.get(body, "")
         return self._name(ch)
 
     @staticmethod
     def _name(ch: str) -> str:
-        if ch in ("\r", "\n"):
-            return "enter"
-        if ch in ("\x7f", "\b"):
-            return "backspace"
-        if ch == "\x03":
-            return "ctrl-c"
-        if ch == "\x04":
-            return "ctrl-d"
-        if ch == "\x0c":
-            return "ctrl-l"
-        return ch if ch.isprintable() else ""
+        return {
+            "\r": "enter", "\n": "enter", "\x7f": "backspace", "\b": "backspace",
+            "\x03": "ctrl-c", "\x04": "ctrl-d", "\x0c": "ctrl-l", "\x15": "ctrl-u",
+            "\x01": "home", "\x05": "end",
+        }.get(ch, ch if ch.isprintable() else "")
 
 
 # -- the app ----------------------------------------------------------------
@@ -167,40 +196,48 @@ class Keys:
 class App:
     """Screen, keyboard, and the UI a Session talks to."""
 
-    TICK = 0.25
+    TICK = 0.2
+    CHROME = 5  # header, status, and the three rows of the input box
 
     def __init__(self, client: Client, root: Path, agent: bool, health: dict) -> None:
         self.client = client
         self.health = health
-        self.lines: list[str] = []
+        self.rows: list[str] = []          # finished, already-styled lines
         self.lock = threading.Lock()
-        self.scroll = 0          # rows from the bottom; 0 is following the tail
+        self.scroll = 0                    # rows above the tail; 0 follows it
         self.entry = ""
+        self.caret = 0
         self.history: list[str] = []
         self.history_at = 0
         self.working_since: float | None = None
         self.running = True
         self.dirty = True
+        self.last_role: str | None = None
 
         self.pending: actions.Action | None = None
         self.answered = threading.Event()
-        self.answer: bool = False
+        self.answer = False
 
-        import nimbus  # imported here: nimbus imports this module to start it
+        import nimbus  # deferred: nimbus imports this module to start it
 
         self.session = nimbus.Session(client, root, agent, self)
         self.command = nimbus.command
 
-        self.write(r.grey(f"  {client.config.url}  ·  {health.get('models', 0)} models"))
-        self.write(r.grey(f"  {root}"))
-        self.write(r.grey("  /help for commands  ·  Ctrl-D to leave"))
-        self.write("")
+        self.write(f"{FAINT}  {client.config.url}   {health.get('models', 0)} models{RESET}")
+        self.write(f"{FAINT}  {root}{RESET}")
+        self.write(f"{FAINT}  ask anything, or /help for commands{RESET}")
 
     # -- the UI a Session sees ---------------------------------------------
 
-    def write(self, text: str) -> None:
+    def write(self, text: str, role: str | None = None) -> None:
+        gutter = GUTTER.get(role or "", "")
         with self.lock:
-            self.lines.extend(text.split("\n"))
+            if role in LABEL and role != self.last_role:
+                self.rows.append("")
+                self.rows.append(f"{FAINT}  {LABEL[role]}{RESET}")
+            self.last_role = role
+            for line in text.split("\n"):
+                self.rows.append(("  " + gutter + line) if gutter else line)
             self.scroll = 0  # new output pulls the view back to the tail
             self.dirty = True
 
@@ -210,14 +247,15 @@ class App:
 
     def confirm(self, action: actions.Action) -> bool:
         """Ask, from the worker thread, and wait for the main thread to answer."""
+        head = f"{GOLD}  {action.kind}  {RESET}{r.bold(action.target or action.body.strip())}"
         self.write("")
-        self.write(r.yellow(f"  {action.kind}: ") + r.bold(action.target or action.body.strip()))
+        self.write(head)
         if action.kind == "write":
-            for line in action.body.splitlines()[:20]:
-                self.write(r.grey("  | ") + line)
-            extra = len(action.body.splitlines()) - 20
-            if extra > 0:
-                self.write(r.grey(f"  | ... {extra} more lines"))
+            body = action.body.splitlines()
+            for line in body[:20]:
+                self.write(f"{FAINT}  │ {RESET}{line}")
+            if len(body) > 20:
+                self.write(f"{FAINT}  │ ... {len(body) - 20} more lines{RESET}")
         self.answered.clear()
         self.pending = action
         self.dirty = True
@@ -228,55 +266,89 @@ class App:
 
     # -- painting -----------------------------------------------------------
 
-    def size(self) -> tuple[int, int]:
-        import shutil
-
+    @staticmethod
+    def size() -> tuple[int, int]:
         size = shutil.get_terminal_size((100, 30))
-        return max(40, size.columns), max(10, size.lines)
+        return max(48, size.columns), max(12, size.lines)
 
     def paint(self) -> None:
         width, height = self.size()
-        body_height = height - 3  # header, status, input
+        body = height - self.CHROME
+        # Two for the frame margin, four for the gutter a role block adds.
+        r.set_width(width - 6)
 
         with self.lock:
-            rows: list[str] = []
-            for line in self.lines:
-                rows.extend(wrap(line, width - 1))
+            painted: list[str] = []
+            for line in self.rows:
+                painted.extend(wrap(line, width - 2))
 
-        top = max(0, len(rows) - body_height - self.scroll)
-        view = rows[top:top + body_height]
-        view += [""] * (body_height - len(view))
+        top = max(0, len(painted) - body - self.scroll)
+        view = painted[top:top + body]
+        # Anchored to the bottom: a conversation grows downward, and an empty
+        # session should show an empty top rather than a screen of nothing
+        # underneath three lines of text.
+        view = [""] * (body - len(view)) + view
 
         out = [f"{ESC}[H", self._header(width), CLEAR_LINE, "\n"]
         for row in view:
             out += [row, CLEAR_LINE, "\n"]
-        out += [self._status(width), CLEAR_LINE, "\n", self._input(width), CLEAR_LINE]
-        sys.stdout.write("".join(out))
+        out += [self._status(width), CLEAR_LINE, "\n"]
+        for row in self._box(width):
+            out += [row, CLEAR_LINE, "\n"]
+        sys.stdout.write("".join(out[:-1]))
         sys.stdout.flush()
 
-    def _header(self, width: int) -> str:
-        left = r.bold(" AhoosAI ") + r.grey("nimbus")
-        right = r.grey(("agent" if self.session.agent else "chat") + " ")
+    def _bar(self, left: str, right: str, width: int) -> str:
         gap = max(1, width - visible(left) - visible(right))
-        return left + " " * gap + right
+        return BAR + left + " " * gap + right + RESET
+
+    def _header(self, width: int) -> str:
+        left = f"{ESC}[1m{INK} AhoosAI{RESET}{BAR}{FAINT}  nimbus{RESET}{BAR}"
+        state = "agent" if self.session.agent else "chat"
+        right = f"{ACCENT if self.session.agent else FAINT}{state} {RESET}{BAR}"
+        return self._bar(left, right, width)
 
     def _status(self, width: int) -> str:
         if self.pending is not None:
-            return r.yellow("  do it?  ") + r.grey("y = yes,  n = no")
+            return self._bar(f"{GOLD} run it?{RESET}{BAR}", f"{FAINT}y = yes   n = no {RESET}{BAR}", width)
         if self.working_since is not None:
             seconds = int(time.monotonic() - self.working_since)
-            note = "  (a sleeping free tier takes about a minute to wake)" if seconds >= 20 else ""
-            return r.grey(f"  working  {seconds}s{note}")
-        hint = "  enter to send  ·  pgup/pgdn to scroll  ·  ctrl-d to leave"
+            note = "   a sleeping free tier takes about a minute" if seconds >= 20 else ""
+            return self._bar(f"{GOLD} working {seconds}s{note}{RESET}{BAR}", "", width)
         if self.scroll:
-            hint = f"  scrolled {self.scroll} rows up  ·  pgdn to follow again"
-        return r.grey(hint)
+            return self._bar(f"{FAINT} scrolled up {self.scroll}{RESET}{BAR}",
+                             f"{FAINT}pgdn to follow {RESET}{BAR}", width)
+        return self._bar(f"{FAINT} {self.workdir()}{RESET}{BAR}",
+                         f"{FAINT}enter send   ctrl-d quit {RESET}{BAR}", width)
 
-    def _input(self, width: int) -> str:
-        prompt = r.cyan(" > ")
-        room = width - 4
-        shown = self.entry[-room:] if len(self.entry) > room else self.entry
-        return prompt + shown
+    def workdir(self) -> str:
+        name = self.session.workspace.root.name
+        return name or str(self.session.workspace.root)
+
+    def _box(self, width: int) -> list[str]:
+        """The input, drawn as an object. It is where you are; it should look it."""
+        inner = width - 2
+        room = inner - 4
+        text = self.entry
+        start = max(0, self.caret - room + 1)
+        shown = text[start:start + room]
+        caret_at = self.caret - start
+
+        lit = shown[:caret_at]
+        under = shown[caret_at:caret_at + 1] or " "
+        rest = shown[caret_at + 1:]
+        field = f"{INK}{lit}{ESC}[7m{under}{RESET}{INK}{rest}{RESET}"
+        # At the end of the line the caret is a space that is not in `shown`,
+        # so padding measured from `shown` leaves the row one column too wide
+        # and the right border falls off the screen.
+        pad = " " * max(0, room - len(lit) - len(under) - len(rest))
+
+        edge = ACCENT if self.working_since is None else GOLD
+        return [
+            f"{edge}╭{'─' * inner}╮{RESET}",
+            f"{edge}│{RESET} {ACCENT}❯{RESET} {field}{pad} {edge}│{RESET}",
+            f"{edge}╰{'─' * inner}╯{RESET}",
+        ]
 
     # -- the loop -----------------------------------------------------------
 
@@ -285,7 +357,11 @@ class App:
         sys.stdout.flush()
         try:
             with Keys() as keys:
+                last_size = self.size()
                 while self.running:
+                    if self.size() != last_size:
+                        last_size, self.dirty = self.size(), True
+                        sys.stdout.write(f"{ESC}[2J")
                     if self.dirty or self.working_since is not None:
                         self.dirty = False
                         self.paint()
@@ -309,20 +385,28 @@ class App:
                 self.answered.set()
             return
 
+        page = max(1, self.size()[1] - self.CHROME - 1)
         if key == "ctrl-d":
             self.running = False
-        elif key == "ctrl-c":
-            self.entry = ""
-        elif key == "ctrl-l":
-            pass  # the next paint is a full frame anyway
+        elif key in ("ctrl-c", "ctrl-u"):
+            self.entry, self.caret = "", 0
         elif key == "pgup":
-            self.scroll += max(1, self.size()[1] - 5)
+            self.scroll += page
         elif key == "pgdn":
-            self.scroll = max(0, self.scroll - max(1, self.size()[1] - 5))
+            self.scroll = max(0, self.scroll - page)
+        elif key == "left":
+            self.caret = max(0, self.caret - 1)
+        elif key == "right":
+            self.caret = min(len(self.entry), self.caret + 1)
+        elif key == "home":
+            self.caret = 0
+        elif key == "end":
+            self.caret = len(self.entry)
         elif key == "up":
             if self.history and self.history_at > 0:
                 self.history_at -= 1
                 self.entry = self.history[self.history_at]
+                self.caret = len(self.entry)
         elif key == "down":
             if self.history_at < len(self.history) - 1:
                 self.history_at += 1
@@ -330,26 +414,32 @@ class App:
             else:
                 self.history_at = len(self.history)
                 self.entry = ""
+            self.caret = len(self.entry)
         elif key == "backspace":
-            self.entry = self.entry[:-1]
+            if self.caret:
+                self.entry = self.entry[:self.caret - 1] + self.entry[self.caret:]
+                self.caret -= 1
+        elif key == "delete":
+            self.entry = self.entry[:self.caret] + self.entry[self.caret + 1:]
         elif key == "enter":
             self.submit()
         elif len(key) == 1:
-            self.entry += key
+            self.entry = self.entry[:self.caret] + key + self.entry[self.caret:]
+            self.caret += 1
 
     def submit(self) -> None:
         line = self.entry.strip()
-        self.entry = ""
         if not line or self.working_since is not None:
             return
+        self.entry, self.caret = "", 0
         self.history.append(line)
         self.history_at = len(self.history)
-        self.write(r.cyan("> ") + line)
+        self.write(line, role="you")
 
         if line.startswith("/"):
+            self.last_role = None
             if not self.command(line, self.session):
                 self.running = False
-            self.write("")
             return
 
         threading.Thread(target=self._work, args=(line,), daemon=True).start()
@@ -358,10 +448,9 @@ class App:
         try:
             self.session.ask(line)
         except Exception as exc:  # a worker that dies silently is a hang
-            self.write(r.red(f"  {type(exc).__name__}: {exc}"))
+            self.write(f"{type(exc).__name__}: {exc}", role="error")
         finally:
             self.busy(False)
-            self.write("")
 
 
 def run(client: Client, root: Path, agent: bool, health: dict) -> int:

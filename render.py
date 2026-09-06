@@ -71,7 +71,24 @@ def cyan(t: str) -> str:     return c("36", t)
 def grey(t: str) -> str:     return c("90", t)
 
 
+_WIDTH: int | None = None
+
+
+def set_width(columns: int | None) -> None:
+    """Declare the column count the caller is actually rendering into.
+
+    A code frame is sized from width(), and inside a full-screen layout the
+    content column is narrower than the terminal -- there is a gutter, a border
+    and a margin in front of it. Without this the frame is built to the wrong
+    width, overflows, and wraps into a broken box.
+    """
+    global _WIDTH
+    _WIDTH = columns
+
+
 def width() -> int:
+    if _WIDTH:
+        return max(24, _WIDTH)
     return max(40, min(shutil.get_terminal_size((100, 30)).columns, 110))
 
 
