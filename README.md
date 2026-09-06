@@ -1,4 +1,4 @@
-# nimbus-cli
+# ahoosai-cli
 
 A terminal client for [Nimbus](https://ahoos-ai.site) — a family of models where
 a manager reads your request, hands it to the specialist that owns the domain,
@@ -31,8 +31,8 @@ limit into a faster rate limit. ...
 There is nothing to install. Python 3.11 or newer, standard library only.
 
 ```bash
-git clone https://github.com/mmdop/nimbus-cli
-cd nimbus-cli
+git clone https://github.com/mmdop/ahoosai-cli
+cd ahoosai-cli
 cp .env.example .env      # then put your server URL and key in it
 python nimbus.py
 ```
