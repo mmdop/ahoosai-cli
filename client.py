@@ -86,7 +86,11 @@ class Client:
     def __post_init__(self) -> None:
         self._headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.config.key:
-            self._headers["X-API-Key"] = self.config.key
+            # Bearer, because that is what require_key reads. An X-API-Key header
+            # is not wrong-looking enough to notice: the server ignores it, the
+            # request is simply unauthenticated, and 401 says "check your key"
+            # about a key that was correct all along.
+            self._headers["Authorization"] = f"Bearer {self.config.key}"
 
     # -- plumbing ----------------------------------------------------------
 
