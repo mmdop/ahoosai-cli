@@ -42,10 +42,20 @@ On Windows, `copy .env.example .env`.
 ## Using it
 
 ```bash
-python nimbus.py                      # chat
+python nimbus.py                      # the full-screen interface
 python nimbus.py -a                   # agent mode, in the current directory
+python nimbus.py --plain              # a plain scrolling prompt instead
 python nimbus.py "why is this slow"   # ask once and exit
 ```
+
+| key | |
+|---|---|
+| `enter` | send |
+| `up` / `down` | earlier things you typed |
+| `pgup` / `pgdn` | scroll back through the conversation |
+| `y` / `n` | answer a confirmation |
+| `ctrl-c` | clear the line you are typing |
+| `ctrl-d` | leave |
 
 | | |
 |---|---|
@@ -96,6 +106,17 @@ the plan, each delegation, each result — and then sends the finished answer in
 one event. A client that drains those events shows nothing for thirty seconds
 and looks hung, so this prints them. The routing is the interesting part anyway.
 
+## Why the interface has no dependencies
+
+textual and prompt_toolkit would both do this better than a few hundred lines
+can. They also turn a `git clone` into a dependency tree, on every machine this
+runs on, for a program whose whole job is to talk to one HTTP endpoint. The
+alternate screen buffer, cursor addressing and raw key input are already in the
+terminal and in the standard library; what was missing is in `tui.py`.
+
+If it will not start -- an unusual console, a redirected stdout -- it says so
+and falls back to the plain prompt rather than refusing to run.
+
 ## Configuration
 
 Read from the environment, or from a `.env` beside the script or in the current
@@ -112,7 +133,8 @@ run, a file is a default from some earlier day.
 
 | | |
 |---|---|
-| `nimbus.py` | the REPL, the conversation, the agent loop |
+| `nimbus.py` | the session, the agent loop, and the plain front end |
+| `tui.py` | the full-screen interface: frame, keyboard, scrollback |
 | `client.py` | HTTP and server-sent events, and turning an error body into a sentence |
 | `actions.py` | the block protocol, the workspace, and what may run without asking |
 | `render.py` | markdown on a terminal, and switching Windows consoles into ANSI |
