@@ -131,10 +131,14 @@ def answer(text: str) -> str:
 
 def _code_block(lang: str, lines: list[str]) -> str:
     """A framed block. Never wrapped: a wrapped line of code is a wrong line."""
+    # Open on the right on purpose. Closing the box means padding every line to
+    # the same width, and a padded line of code is a changed line of code --
+    # trailing whitespace that was not in the answer. The left rail is what
+    # separates code from prose; the right edge was decoration.
     label = lang or "text"
     inner = width() - 2
-    top = grey("┌─ ") + yellow(label) + grey(" " + "─" * max(0, inner - len(label) - 4) + "┐")
-    bottom = grey("└" + "─" * inner + "┘")
+    top = grey("┌─ ") + yellow(label) + grey(" " + "─" * max(0, inner - len(label) - 4))
+    bottom = grey("└" + "─" * (inner - 1))
     body = [grey("│ ") + line for line in lines]
     return "\n".join(["", top, *body, bottom, ""])
 
