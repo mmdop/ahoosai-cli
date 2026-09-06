@@ -204,6 +204,16 @@ class App:
         self.health = health
         self.rows: list[str] = []          # finished, already-styled lines
         self.lock = threading.Lock()
+        # Wrapping every row on every frame is the whole cost of this loop: it
+        # is O(the conversation) five times a second, so it gets slower exactly
+        # as the conversation gets longer. Rows are only ever appended, so the
+        # wrapped form is kept and only the new tail is wrapped.
+        self._wrapped: list[str] = []
+        self._wrapped_upto = 0
+        self._wrapped_at_width = 0
+        self._size = (100, 30)
+        self._size_at = 0.0
+        self._shown_second = -1
         self.scroll = 0                    # rows above the tail; 0 follows it
         self.entry = ""
         self.caret = 0
@@ -266,10 +276,30 @@ class App:
 
     # -- painting -----------------------------------------------------------
 
-    @staticmethod
-    def size() -> tuple[int, int]:
-        size = shutil.get_terminal_size((100, 30))
-        return max(48, size.columns), max(12, size.lines)
+    def size(self) -> tuple[int, int]:
+        """The terminal size, asked for at most twice a second.
+
+        get_terminal_size is a system call, and it was being made from the
+        paint, from the key handler and twice from the loop -- several times per
+        keystroke, for a number that changes when someone drags a window edge.
+        """
+        now = time.monotonic()
+        if now - self._size_at > 0.5:
+            size = shutil.get_terminal_size((100, 30))
+            self._size = (max(48, size.columns), max(12, size.lines))
+            self._size_at = now
+        return self._size
+
+    def painted(self, width: int) -> list[str]:
+        """Every row, wrapped to width, wrapping only what is new."""
+        with self.lock:
+            if width != self._wrapped_at_width:
+                self._wrapped, self._wrapped_upto = [], 0
+                self._wrapped_at_width = width
+            while self._wrapped_upto < len(self.rows):
+                self._wrapped.extend(wrap(self.rows[self._wrapped_upto], width - 2))
+                self._wrapped_upto += 1
+            return list(self._wrapped)
 
     def paint(self) -> None:
         width, height = self.size()
@@ -277,11 +307,7 @@ class App:
         # Two for the frame margin, four for the gutter a role block adds.
         r.set_width(width - 6)
 
-        with self.lock:
-            painted: list[str] = []
-            for line in self.rows:
-                painted.extend(wrap(line, width - 2))
-
+        painted = self.painted(width)
         top = max(0, len(painted) - body - self.scroll)
         view = painted[top:top + body]
         # Anchored to the bottom: a conversation grows downward, and an empty
@@ -362,7 +388,9 @@ class App:
                     if self.size() != last_size:
                         last_size, self.dirty = self.size(), True
                         sys.stdout.write(f"{ESC}[2J")
-                    if self.dirty or self.working_since is not None:
+                    tick = -1 if self.working_since is None else int(time.monotonic() - self.working_since)
+                    if self.dirty or tick != self._shown_second:
+                        self._shown_second = tick
                         self.dirty = False
                         self.paint()
                     key = keys.get(self.TICK)
